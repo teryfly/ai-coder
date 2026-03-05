@@ -21,10 +21,10 @@ class ExecutorConfig:
 
     backup_enabled: bool = True
     allow_shell: bool = True
-    shell_timeout: int = 300
+    shell_timeout: int = 3000
     verify_writes: bool = False
-    log_level: str = "INFO"
+    log_level: str = "ERROR" # INFO、DEBUG、WARNING、ERROR
     log_dir: str = "log"
     max_file_size: int = 10_485_760
-    max_path_length: int = 260
+    max_path_length: int = 560
     backup_dir: str | None = None
