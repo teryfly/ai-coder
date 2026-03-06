@@ -6,11 +6,11 @@ max_files_per_run: 20
 
 agents:
   architect:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/architect.md"
   engineer:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/engineer.md"
   programmer:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/programmer.md"

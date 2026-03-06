@@ -80,13 +80,13 @@ max_files_per_run: 20                  # 单次任务最大文件数，超过则
 
 agents:
   architect:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/architect.md"
   engineer:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/engineer.md"
   programmer:
-    model: "claude-sonnet-4-20250514"
+    model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/programmer.md"
 ```
 

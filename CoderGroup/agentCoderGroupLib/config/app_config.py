@@ -31,7 +31,7 @@ def load_config(path: str = "config.yaml") -> AppConfig:
     def _agent(key: str) -> AgentConfig:
         ag = agents_data.get(key, {})
         return AgentConfig(
-            model=ag.get("model", "claude-sonnet-4-20250514"),
+            model=ag.get("model", "GPT-5.3-Codex"),
             prompt_file=ag.get("prompt_file", f"role_prompts/{key}.md"),
         )
 

@@ -13,11 +13,27 @@ class ChatBackendClient:
             {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         )
 
+    def _extract_error_detail(self, resp: requests.Response) -> str:
+        """Safely parse backend error payloads that may be dict/list/plain text."""
+        if not resp.content:
+            return resp.text or "unknown error"
+
+        try:
+            payload = resp.json()
+        except ValueError:
+            return resp.text or "unknown error"
+
+        if isinstance(payload, dict):
+            detail = payload.get("detail", payload)
+        else:
+            detail = payload
+        return str(detail)
+
     def _get(self, path: str, params: dict = None) -> dict:
         url = f"{self._base_url}{path}"
         resp = self._session.get(url, params=params)
         if not resp.ok:
-            detail = resp.json().get("detail", resp.text) if resp.content else resp.text
+            detail = self._extract_error_detail(resp)
             raise ChatBackendError(f"GET {path} failed ({resp.status_code}): {detail}")
         return resp.json()
 
@@ -25,7 +41,7 @@ class ChatBackendClient:
         url = f"{self._base_url}{path}"
         resp = self._session.post(url, json=body or {})
         if not resp.ok:
-            detail = resp.json().get("detail", resp.text) if resp.content else resp.text
+            detail = self._extract_error_detail(resp)
             raise ChatBackendError(f"POST {path} failed ({resp.status_code}): {detail}")
         return resp.json()
 
@@ -33,7 +49,7 @@ class ChatBackendClient:
         url = f"{self._base_url}{path}"
         resp = self._session.put(url, json=body or {})
         if not resp.ok:
-            detail = resp.json().get("detail", resp.text) if resp.content else resp.text
+            detail = self._extract_error_detail(resp)
             raise ChatBackendError(f"PUT {path} failed ({resp.status_code}): {detail}")
         return resp.json()
 
@@ -93,12 +109,47 @@ class ChatBackendClient:
 
     # --- Knowledge / Documents ---
 
-    def get_knowledge_docs(self, project_id: int) -> list[dict]:
+    def _latest_docs_from_history(self, project_id: int, category_id: int) -> list[dict]:
+        """Fallback for backends where /documents/latest is unavailable or mis-routed."""
         data = self._get(
-            "/v1/plan/documents/latest",
-            params={"project_id": project_id, "category_id": 5},
+            "/v1/plan/documents/history",
+            params={"project_id": project_id, "category_id": category_id},
         )
-        return data.get("items", [])
+        records = data if isinstance(data, list) else data.get("items", [])
+
+        latest_by_filename: dict[str, dict] = {}
+        for doc in records:
+            filename = str(doc.get("filename", "")).strip()
+            if not filename:
+                continue
+
+            existing = latest_by_filename.get(filename)
+            current_ver = int(doc.get("version", 0) or 0)
+            existing_ver = int(existing.get("version", 0) or 0) if existing else -1
+
+            if existing is None or current_ver >= existing_ver:
+                latest_by_filename[filename] = doc
+
+        return list(latest_by_filename.values())
+
+    def get_knowledge_docs(self, project_id: int) -> list[dict]:
+        """
+        Preferred endpoint: /v1/plan/documents/latest
+        Fallback endpoint: /v1/plan/documents/history (older/misconfigured backends)
+        """
+        try:
+            data = self._get(
+                "/v1/plan/documents/latest",
+                params={"project_id": project_id, "category_id": 5},
+            )
+            return data.get("items", []) if isinstance(data, dict) else []
+        except ChatBackendError as exc:
+            message = str(exc).lower()
+            # FastAPI route-order issue symptom:
+            # /documents/latest got matched by /documents/{document_id}
+            if "documents/latest" in message and "int_parsing" in message:
+                return self._latest_docs_from_history(project_id=project_id, category_id=5)
+            raise
 
     def get_referenced_documents(self, conv_id: str) -> dict:
         return self._get(f"/v1/chat/conversations/{conv_id}/referenced-documents")

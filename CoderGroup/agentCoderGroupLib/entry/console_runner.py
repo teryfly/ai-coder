@@ -1,4 +1,4 @@
-from ..adapters.chat_backend_client import ChatBackendClient
+from ..adapters.chat_backend_client import ChatBackendClient, ChatBackendError
 from ..adapters.code_executor_adapter import CodeExecutorAdapter
 from ..agents.architect_agent import ArchitectAgent
 from ..config.app_config import AppConfig, load_config
@@ -69,17 +69,47 @@ class ConsoleRunner:
             except IndexError:
                 print("Invalid selection.")
                 return
-            message = input("Your message: ").strip()
-            reply = self._client.send_message(
-                conv["id"], message, self._config.architect.model
-            )
+            self._chat_existing_conversation(conv)
+
+    def _chat_existing_conversation(self, conv: dict) -> None:
+        """
+        Keep interaction alive in the selected existing conversation.
+        User must explicitly exit by typing /exit, exit, quit, or q.
+        """
+        model = conv.get("model") or self._config.architect.model
+        exit_words = {"/exit", "exit", "quit", "q"}
+
+        print("\n[Interactive mode] Type /exit to end this conversation.")
+        message = input("Your message: ").strip()
+
+        while True:
+            if message.lower() in exit_words:
+                print("Conversation ended.")
+                return
+
+            if not message:
+                message = input("Your message (cannot be empty): ").strip()
+                continue
+
+            reply = self._client.send_message(conv["id"], message, model)
             print(f"\n[Reply]\n{reply}")
+
+            if requires_user_input(reply):
+                print("\n[Agent requires confirmation.]")
+                message = input("Your response (or /exit): ").strip()
+            else:
+                message = input("\nYour next message (or /exit): ").strip()
 
     def _run_new_session(self, project: dict, conv_name: str, requirement: str) -> None:
         project_id = project["id"]
 
-        docs = self._client.get_knowledge_docs(project_id)
         knowledge_block = ""
+        try:
+            docs = self._client.get_knowledge_docs(project_id)
+        except ChatBackendError as exc:
+            print(f"[Warning] Failed to load knowledge docs, continue without them: {exc}")
+            docs = []
+
         for doc in docs:
             filename = doc.get("filename", "doc")
             content = doc.get("content", "")
