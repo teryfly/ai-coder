@@ -1,0 +1,16 @@
+chat_backend:
+  url: "http://localhost:8000"
+  token: "sk-test-your-token-here"
+
+max_files_per_run: 20
+
+agents:
+  architect:
+    model: "claude-sonnet-4-20250514"
+    prompt_file: "role_prompts/architect.md"
+  engineer:
+    model: "claude-sonnet-4-20250514"
+    prompt_file: "role_prompts/engineer.md"
+  programmer:
+    model: "claude-sonnet-4-20250514"
+    prompt_file: "role_prompts/programmer.md"
