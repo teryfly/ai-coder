@@ -1,12 +1,19 @@
 """Setup configuration for codeAiExecutorLib."""
 
+import os
 from setuptools import setup, find_packages
+
+# Read README.md with UTF-8 encoding to avoid UnicodeDecodeError on Windows (GBK locale)
+long_description = ""
+if os.path.exists("README.md"):
+    with open("README.md", "r", encoding="utf-8") as f:
+        long_description = f.read()
 
 setup(
     name="codeAiExecutorLib",
     version="2.0.0",
     description="AI-driven batch file, folder, and shell operations with streaming feedback",
-    long_description=open("README.md").read() if open("README.md") else "",
+    long_description=long_description,
     long_description_content_type="text/markdown",
     author="CodeExecutor Contributors",
     python_requires=">=3.10",
