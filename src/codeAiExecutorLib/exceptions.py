@@ -1,4 +1,4 @@
-"""Custom exception hierarchy for codeAIexecutorlib."""
+"""Custom exception hierarchy for codeAiExecutorLib."""
 
 
 class CodeExecutorError(Exception):

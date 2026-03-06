@@ -1,5 +1,5 @@
 
-# codeAIexecutorlib
+# codeAiExecutorLib
 
 AI-driven batch file, folder, and shell operations with streaming progress feedback.
 
@@ -22,7 +22,7 @@ pip install -e .
 ## Quick Start
 
 ```python
-from codeAIexecutorlib import CodeExecutor
+from codeAiExecutorLib import CodeExecutor
 
 executor = CodeExecutor()
 
@@ -51,7 +51,7 @@ for message in executor.execute("/path/to/project", tasks):
 ## Configuration
 
 ```python
-from codeAIexecutorlib import CodeExecutor, ExecutorConfig
+from codeAiExecutorLib import CodeExecutor, ExecutorConfig
 
 config = ExecutorConfig(
     backup_enabled=True,

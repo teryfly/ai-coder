@@ -1,9 +1,9 @@
-"""Setup configuration for codeAIexecutorlib."""
+"""Setup configuration for codeAiExecutorLib."""
 
 from setuptools import setup, find_packages
 
 setup(
-    name="codeAIexecutorlib",
+    name="codeAiExecutorLib",
     version="2.0.0",
     description="AI-driven batch file, folder, and shell operations with streaming feedback",
     long_description=open("README.md").read() if open("README.md") else "",

@@ -1,4 +1,4 @@
-# codeAIexecutorlib 方法调用文档
+# codeAiExecutorLib 方法调用文档
 
 ## 1. 目标与适用范围
 
@@ -33,7 +33,7 @@ pip install -e .
 ```
 
 ```python
-from codeAIexecutorlib import CodeExecutor, ExecutorConfig
+from codeAiExecutorLib import CodeExecutor, ExecutorConfig
 ```
 
 ---
@@ -215,7 +215,7 @@ File Path: example/output/a.txt
 ## 5. 第三方最小集成模板（推荐）
 
 ```python
-from codefileexecutorlib import CodeExecutor
+from codeAiExecutorLib import CodeExecutor
 
 def run_tasks(root_dir: str, task_text: str):
     executor = CodeExecutor()
@@ -254,7 +254,7 @@ def run_tasks(root_dir: str, task_text: str):
 ## 7. Utility 方法调用示例（对应 Demo 13）
 
 ```python
-from codefileexecutorlib import CodeExecutor
+from codeAiExecutorLib import CodeExecutor
 
 executor = CodeExecutor()
 

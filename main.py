@@ -1,4 +1,4 @@
-"""Interactive demo program for codeAIexecutorlib.
+"""Interactive demo program for codeAiExecutorLib.
 
 This program demonstrates all features of the library through
 an interactive menu system with real-world examples.
@@ -13,7 +13,7 @@ import sys
 # Add src to path for development
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from codefileexecutorlib import CodeExecutor
+from codeAiExecutorLib import CodeExecutor
 from example.demo_utils import (
     print_separator,
     print_stream_messages,
@@ -470,7 +470,7 @@ def demo_utility_methods():
 def show_menu():
     """Display the main menu."""
     clear_screen()
-    print_separator("codeAIexecutorlib - Interactive Demo")
+    print_separator("codeAiExecutorLib - Interactive Demo")
     
     print("Select a demo to run:\n")
     print("  File Operations:")
@@ -573,7 +573,7 @@ def main():
         choice = input("Enter your choice: ").strip()
         
         if choice == '0':
-            print("\n👋 Thank you for using codeAIexecutorlib!")
+            print("\n👋 Thank you for using codeAiExecutorLib!")
             break
         
         if choice in demos:

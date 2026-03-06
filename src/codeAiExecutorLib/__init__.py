@@ -1,4 +1,4 @@
-"""codeAIexecutorlib - AI-driven batch file, folder, and shell operations."""
+"""codeAiExecutorLib - AI-driven batch file, folder, and shell operations."""
 
 from .executor import CodeExecutor
 from .config import ExecutorConfig
