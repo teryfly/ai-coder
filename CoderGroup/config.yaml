@@ -2,7 +2,7 @@ chat_backend:
   url: "http://localhost:8000"
   token: "sk-test-your-token-here"
 
-max_files_per_run: 20
+max_files_per_run: 30
 
 agents:
   architect:

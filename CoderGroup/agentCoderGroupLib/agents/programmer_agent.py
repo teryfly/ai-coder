@@ -1,14 +1,32 @@
 from ..adapters.chat_backend_client import ChatBackendClient
 from ..config.app_config import AppConfig
-from ..config.constants import STEP_RE
+from ..orchestrator.reply_rules import (
+    extract_last_step_progress,
+    programmer_is_complete,
+    programmer_should_auto_continue,
+)
 from .base_agent import BaseAgent
 
 
 class ProgrammerAgent(BaseAgent):
     def __init__(
-        self, client: ChatBackendClient, config: AppConfig, project_id: int, conv_name: str
+        self,
+        client: ChatBackendClient,
+        config: AppConfig,
+        project_id: int,
+        conv_name: str,
+        conversation_document_ids: list[int] | None = None,
+        conversation_id: str | None = None,
     ):
-        super().__init__(client, config, project_id, conv_name, "programmer")
+        super().__init__(
+            client,
+            config,
+            project_id,
+            conv_name,
+            "programmer",
+            conversation_document_ids=conversation_document_ids,
+            conversation_id=conversation_id,
+        )
         self.accumulated_output: str = ""
 
     def send(self, message: str) -> str:
@@ -17,15 +35,16 @@ class ProgrammerAgent(BaseAgent):
         return reply
 
     def is_complete(self, reply: str) -> bool:
-        x, y = self.extract_step_progress(reply)
-        return x >= y
+        return programmer_is_complete(reply)
+
+    def should_auto_continue(self, text: str) -> bool:
+        return programmer_should_auto_continue(text)
 
     def extract_step_progress(self, text: str) -> tuple[int, int]:
-        matches = STEP_RE.findall(text)
-        if not matches:
+        progress = extract_last_step_progress(text)
+        if progress is None:
             return (0, 1)
-        x, y = matches[-1]
-        return (int(x), int(y))
+        return (progress.x, progress.y)
 
     def get_full_code_output(self) -> str:
         return self.accumulated_output

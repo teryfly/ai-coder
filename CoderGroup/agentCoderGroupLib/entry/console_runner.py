@@ -1,203 +1,182 @@
 from ..adapters.chat_backend_client import ChatBackendClient, ChatBackendError
 from ..adapters.code_executor_adapter import CodeExecutorAdapter
-from ..agents.architect_agent import ArchitectAgent
-from ..config.app_config import AppConfig, load_config
-from ..config.constants import GO_ON_PROMPT
-from ..orchestrator.engineer_loop import EngineerLoop
-from ..orchestrator.programmer_loop import ProgrammerLoop
-from ..orchestrator.task_router import TaskRouter
-from ..reporting.progress_reporter import ProgressReporter
+from ..config.app_config import AppConfig, load_config, load_prompt
+from ..config.task_types import TaskType, get_agent_key_for_task_type
 from ..reporting.result_models import FinalResult
-
-
-def requires_user_input(reply: str) -> bool:
-    lines = reply.splitlines()
-    last_lines = lines[-3:] if len(lines) >= 3 else lines
-    return (
-        any("?" in l for l in last_lines)
-        or "[Awaiting confirmation]" in reply
-        or "please confirm" in reply.lower()
-        or "do you want" in reply.lower()
-    )
+from .console_ui import ConsoleUI
+from .document_reference_selector import DocumentReferenceSelector
+from .project_selector import ProjectSelector
+from .session_task_runner import SessionTaskRunner
+from .task_type_selector import TaskTypeSelector
 
 
 class ConsoleRunner:
     def __init__(self, config: AppConfig):
         self._config = config
         self._client = ChatBackendClient(config.chat_backend_url, config.chat_backend_token)
-        self._reporter = ProgressReporter(mode="console")
         self._executor = CodeExecutorAdapter()
-
-    def run(self) -> None:
-        projects = self._client.list_projects()
-        if not projects:
-            print("No projects found.")
-            return
-
-        print("\n=== Projects ===")
-        for i, p in enumerate(projects, 1):
-            print(f"  {i}. {p['name']} (id={p['id']})")
-
-        try:
-            choice = int(input("\nSelect project number: ")) - 1
-            project = projects[choice]
-        except (ValueError, IndexError):
-            print("Invalid selection.")
-            return
-
-        print(f"\nSelected: {project['name']}")
-
-        convs = self._client.list_conversations(project["id"])
-        print("\n=== Conversations ===")
-        print("  0. New conversation")
-        for i, c in enumerate(convs, 1):
-            print(f"  {i}. {c['name']} (updated: {c.get('updated_at', 'N/A')})")
-
-        try:
-            conv_choice = int(input("\nSelect conversation (0 for new): "))
-        except ValueError:
-            print("Invalid selection.")
-            return
-
-        if conv_choice == 0:
-            conv_name = input("Conversation name: ").strip()
-            requirement = input("Coding requirement: ").strip()
-            self._run_new_session(project, conv_name, requirement)
-        else:
-            try:
-                conv = convs[conv_choice - 1]
-            except IndexError:
-                print("Invalid selection.")
-                return
-            self._chat_existing_conversation(conv)
-
-    def _chat_existing_conversation(self, conv: dict) -> None:
-        """
-        Keep interaction alive in the selected existing conversation.
-        User must explicitly exit by typing /exit, exit, quit, or q.
-        """
-        model = conv.get("model") or self._config.architect.model
-        exit_words = {"/exit", "exit", "quit", "q"}
-
-        print("\n[Interactive mode] Type /exit to end this conversation.")
-        message = input("Your message: ").strip()
-
-        while True:
-            if message.lower() in exit_words:
-                print("Conversation ended.")
-                return
-
-            if not message:
-                message = input("Your message (cannot be empty): ").strip()
-                continue
-
-            reply = self._client.send_message(conv["id"], message, model)
-            print(f"\n[Reply]\n{reply}")
-
-            if requires_user_input(reply):
-                print("\n[Agent requires confirmation.]")
-                message = input("Your response (or /exit): ").strip()
-            else:
-                message = input("\nYour next message (or /exit): ").strip()
-
-    def _run_new_session(self, project: dict, conv_name: str, requirement: str) -> None:
-        project_id = project["id"]
-
-        knowledge_block = ""
-        try:
-            docs = self._client.get_knowledge_docs(project_id)
-        except ChatBackendError as exc:
-            print(f"[Warning] Failed to load knowledge docs, continue without them: {exc}")
-            docs = []
-
-        for doc in docs:
-            filename = doc.get("filename", "doc")
-            content = doc.get("content", "")
-            knowledge_block += (
-                f"----- {filename} BEGIN -----\n{content}\n----- {filename} END -----\n\n"
-            )
-
-        first_message = (knowledge_block + requirement).strip()
-
-        self._reporter.emit("status", "ArchitectAgent", "Starting architect phase...")
-        architect = ArchitectAgent(self._client, self._config, project_id, conv_name)
-
-        reply = architect.send(first_message)
-        self._reporter.emit_line_count("ArchitectAgent", reply)
-
-        while not architect.is_complete(reply):
-            if requires_user_input(reply):
-                user_response = input("Your response: ").strip()
-                reply = architect.send(user_response)
-            else:
-                reply = architect.send(GO_ON_PROMPT)
-            self._reporter.emit_line_count("ArchitectAgent", reply)
-
-        file_count = architect.extract_file_count(reply)
-        task_doc = architect.get_task_document()
-        self._reporter.emit(
-            "status", "ArchitectAgent", f"Architect complete. Estimated files: {file_count}"
+        self._ui = ConsoleUI(max_output_lines=32)
+        self._project_selector = ProjectSelector(self._client, self._ui)
+        self._task_type_selector = TaskTypeSelector(self._ui)
+        self._doc_selector = DocumentReferenceSelector(self._client, self._ui)
+        self._session_runner = SessionTaskRunner(
+            client=self._client, config=self._config, executor=self._executor, ui=self._ui
         )
 
-        router = TaskRouter(self._config.max_files_per_run)
-        route = router.route(file_count)
-        self._reporter.emit("status", "TaskRouter", f"Routing to: {route}")
+    def run(self) -> None:
+        self._ui.set_title("agentCoderGroup Console (Ctrl+Enter to send)")
+        while True:
+            project = self._project_selector.select_or_create()
+            if project is None:
+                self._ui.append_output("Exit command received. Bye.")
+                self._ui.render()
+                return
+            self._project_menu(project)
 
-        if route == "programmer":
-            loop = ProgrammerLoop(self._client, self._config, self._executor, self._reporter)
-            result = loop.run(task_doc, project)
-            final = FinalResult(
-                task_id=architect.conversation_id,
-                success=result.success,
-                root_dir=result.root_dir,
-                project_name=project["name"],
-                sub_results=[],
-                error_node=result.error_node,
-                error_reason=result.error_reason,
+    def _project_menu(self, project: dict) -> None:
+        while True:
+            convs = self._client.list_conversations(project["id"])
+            lines = ["Conversations:", "  0. New coding session"]
+            for i, c in enumerate(convs, 1):
+                lines.append(f"  {i}. {c.get('name', 'unnamed')}")
+            lines.append("  b. Back to project list")
+            self._ui.set_output(lines)
+            self._ui.set_info(
+                [
+                    f"Current project: {project.get('name')} (id={project.get('id')})",
+                    "Input 0 to create coding session",
+                    "Input conversation index to chat",
+                    "Input b to back",
+                ]
             )
+
+            choice = self._ui.prompt_input("Select conversation: ")
+            if ConsoleUI.is_exit_command(choice):
+                raise SystemExit(0)
+            if choice.lower() == "b":
+                return
+            if choice == "0":
+                self._run_new_session(project)
+                continue
+
+            try:
+                conv = convs[int(choice) - 1]
+                self._chat_existing_conversation(project, conv)
+            except (ValueError, IndexError):
+                self._ui.append_output("Invalid conversation selection.")
+
+    def _run_new_session(self, project: dict) -> None:
+        conv_name = self._ui.prompt_input("Conversation name: ")
+        if ConsoleUI.is_exit_command(conv_name):
+            raise SystemExit(0)
+
+        task_type = self._task_type_selector.select()
+        conversation_id = self._create_task_conversation(int(project["id"]), conv_name, task_type)
+        if not conversation_id:
+            return
+
+        selected_doc_ids = self._doc_selector.choose_conversation_level_references(
+            int(project["id"]), conversation_id
+        )
+        if selected_doc_ids:
+            try:
+                self._client.set_conversation_document_references(conversation_id, selected_doc_ids)
+                self._ui.append_output(
+                    f"Conversation-level references set: {len(selected_doc_ids)} document(s)."
+                )
+                self._ui.append_outputs(
+                    self._doc_selector.render_references_for_conversation(
+                        int(project["id"]), conversation_id
+                    )
+                )
+            except ChatBackendError as exc:
+                self._ui.append_output(f"Set conversation-level references failed: {exc}")
         else:
-            loop = EngineerLoop(self._client, self._config, self._executor, self._reporter)
-            sub_results = loop.run(task_doc, project)
-            success = all(r.success for r in sub_results)
-            failed = next((r for r in sub_results if not r.success), None)
-            root_dir = project.get("ai_work_dir", ".")
-            final = FinalResult(
-                task_id=architect.conversation_id,
-                success=success,
-                root_dir=root_dir,
-                project_name=project["name"],
-                sub_results=sub_results,
-                error_node=failed.error_node if failed else None,
-                error_reason=failed.error_reason if failed else None,
+            self._ui.append_output("Conversation-level references skipped.")
+            self._ui.append_outputs(
+                self._doc_selector.render_references_for_conversation(
+                    int(project["id"]), conversation_id
+                )
             )
 
+        requirement = self._prompt_task_input(task_type)
+        if ConsoleUI.is_exit_command(requirement):
+            raise SystemExit(0)
+
+        final = self._session_runner.run(
+            project=project,
+            conv_name=conv_name,
+            task_type=task_type,
+            requirement=requirement,
+            conversation_document_ids=selected_doc_ids,
+            existing_conversation_id=conversation_id,
+        )
         self._print_final_result(final)
 
+    def _create_task_conversation(self, project_id: int, conv_name: str, task_type: TaskType) -> str | None:
+        agent_key = get_agent_key_for_task_type(task_type)
+        cfg = getattr(self._config, agent_key)
+        try:
+            prompt = load_prompt(cfg.prompt_file)
+            return self._client.create_conversation(
+                project_id=project_id,
+                name=conv_name,
+                system_prompt=prompt,
+                model=cfg.model,
+                assistance_role=agent_key,
+            )
+        except ChatBackendError as exc:
+            self._ui.append_output(f"Create conversation failed: {exc}")
+            return None
+
+    def _prompt_task_input(self, task_type: TaskType) -> str:
+        if task_type == "formal_dev":
+            return self._ui.prompt_input("Formal development document: ")
+        if task_type == "code_change":
+            return self._ui.prompt_input("Change request / bug description: ")
+        return self._ui.prompt_input("Coding requirement: ")
+
+    def _chat_existing_conversation(self, project: dict, conv: dict) -> None:
+        model = conv.get("model") or self._config.architect.model
+        self._ui.set_output(
+            self._doc_selector.render_references_for_conversation(int(project["id"]), conv["id"])
+        )
+        self._ui.set_info(["Reference preview before chat.", "Input /back to return."])
+        self._ui.render()
+
+        self._ui.append_output("Interactive mode. /back to return.")
+        while True:
+            msg = self._ui.prompt_input("You: ")
+            if ConsoleUI.is_exit_command(msg):
+                raise SystemExit(0)
+            if msg.strip().lower() == "/back":
+                return
+            if not msg:
+                self._ui.append_output("Message cannot be empty.")
+                continue
+            reply = self._client.send_message(conv["id"], msg, model)
+            self._ui.append_output(f"[Reply]\n{reply}")
+
     def _print_final_result(self, result: FinalResult) -> None:
-        print("\n=== Task Complete ===")
-        print(f"Project  : {result.project_name}")
-        print(f"Root Dir : {result.root_dir}")
-        print(f"Success  : {result.success}")
-
+        self._ui.append_output("=== Task Complete ===")
+        self._ui.append_output(f"Project: {result.project_name}")
+        self._ui.append_output(f"Root Dir: {result.root_dir}")
+        self._ui.append_output(f"Success: {result.success}")
         if result.sub_results:
-            print("\nCompleted Sub-tasks:")
             for sr in result.sub_results:
-                status = "v" if sr.success else "x"
                 steps = sum(pr.steps_completed for pr in sr.programmer_results)
-                print(f"  [Phase {sr.phase_id}] {status} {steps} steps")
-
-        if not result.success and result.error_node:
-            print(f"\nError Node    : conversation/{result.error_node}")
-            print(f"Error Reason  : {result.error_reason}")
-
+                state = "OK" if sr.success else "FAIL"
+                self._ui.append_output(f"Phase {sr.phase_id}: {state} ({steps} steps)")
+        if not result.success:
+            self._ui.append_output(f"Error Node: {result.error_node}")
+            self._ui.append_output(f"Error Reason: {result.error_reason}")
         if result.usage_hint:
-            print(f"\nUsage:\n  {result.usage_hint}")
+            self._ui.append_output(f"Usage: {result.usage_hint}")
 
 
 def main():
     config = load_config()
-    runner = ConsoleRunner(config)
-    runner.run()
+    ConsoleRunner(config).run()
 
 
 if __name__ == "__main__":
