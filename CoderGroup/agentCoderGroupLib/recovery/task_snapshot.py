@@ -41,10 +41,13 @@ class TaskSnapshot:
     state: str = "running"
     current_stage: str = "architect"
     conversation_ids: dict[str, str] = field(default_factory=dict)
+    conversation_names: dict[str, str] = field(default_factory=dict)
     architect_result: dict | None = None
     engineer_completed_phases: list[str] = field(default_factory=list)
     engineer_current_phase: str | None = None
     engineer_conv_id: str | None = None
+    programmer_phase_conversations: dict[str, str] = field(default_factory=dict)
+    programmer_phase_names: dict[str, str] = field(default_factory=dict)
     programmer_accumulated_output: str = ""
     programmer_step_progress: list[int] = field(default_factory=list)
     programmer_conv_id: str | None = None
@@ -76,6 +79,7 @@ class TaskSnapshot:
             state=str(payload.get("state", "running")),
             current_stage=str(payload.get("current_stage", "architect")),
             conversation_ids=_as_str_dict(payload.get("conversation_ids")),
+            conversation_names=_as_str_dict(payload.get("conversation_names")),
             architect_result=payload.get("architect_result")
             if isinstance(payload.get("architect_result"), dict)
             else None,
@@ -94,6 +98,8 @@ class TaskSnapshot:
                 if payload.get("engineer_conv_id") is not None
                 else None
             ),
+            programmer_phase_conversations=_as_str_dict(payload.get("programmer_phase_conversations")),
+            programmer_phase_names=_as_str_dict(payload.get("programmer_phase_names")),
             programmer_accumulated_output=str(payload.get("programmer_accumulated_output", "")),
             programmer_step_progress=_as_int_list(payload.get("programmer_step_progress")),
             programmer_conv_id=(
@@ -124,6 +130,8 @@ class ResumeContext:
     architect_conv_id: str | None
     engineer_completed_phases: list[str]
     engineer_conv_id: str | None
+    engineer_current_phase: str | None
+    programmer_phase_conversations: dict[str, str]
     programmer_accumulated_output: str
     programmer_conv_id: str | None
     execution_completed_steps: list[int]

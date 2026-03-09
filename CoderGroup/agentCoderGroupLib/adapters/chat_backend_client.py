@@ -128,6 +128,67 @@ class ChatBackendClient:
         data = self._post(f"/v1/chat/conversations/{conv_id}/messages", body)
         return data.get("reply", "")
 
+    def send_message_stream(
+        self,
+        conv_id: str,
+        content: str,
+        model: str,
+        documents: list[int] | None = None,
+    ):
+        """
+        Stream message to chat backend and yield chunks.
+        
+        Yields tuples of (chunk_text, is_final):
+        - chunk_text: partial response text
+        - is_final: True if this is the last chunk
+        """
+        body: dict = {"role": "user", "content": content, "model": model, "stream": True}
+        if documents:
+            body["documents"] = [int(x) for x in documents]
+        
+        url = f"{self._base_url}/v1/chat/conversations/{conv_id}/messages"
+        
+        try:
+            with self._session.post(url, json=body, stream=True, timeout=300) as resp:
+                if not resp.ok:
+                    detail = self._extract_error_detail(resp)
+                    raise ChatBackendError(f"POST /messages (stream) failed ({resp.status_code}): {detail}")
+                
+                accumulated = ""
+                for line in resp.iter_lines():
+                    if not line:
+                        continue
+                    
+                    line_str = line.decode('utf-8').strip()
+                    
+                    if line_str == "data: [DONE]":
+                        yield accumulated, True
+                        return
+                    
+                    if not line_str.startswith("data: "):
+                        continue
+                    
+                    try:
+                        import json
+                        chunk_data = json.loads(line_str[6:])
+                        
+                        if "content" in chunk_data:
+                            chunk_text = chunk_data["content"]
+                            accumulated += chunk_text
+                            
+                            finish_reason = chunk_data.get("finish_reason")
+                            is_final = finish_reason == "stop"
+                            
+                            yield chunk_text, is_final
+                            
+                            if is_final:
+                                return
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                        
+        except requests.exceptions.RequestException as e:
+            raise ChatBackendError(f"Stream request failed: {e}")
+
     # --- Plan Documents ---
 
     def _latest_docs_from_history(

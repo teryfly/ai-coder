@@ -57,8 +57,10 @@ class EngineerLoop:
         task_id: str | None = None,
         snapshot: "TaskSnapshot | None" = None,
         resume_context: "ResumeContext | None" = None,
+        use_stream: bool = True,
     ) -> list[SubTaskResult]:
         from .programmer_loop import ProgrammerLoop
+        from .reply_rules import is_engineer_last_phase
         from .task_router import TaskRouter
 
         project_id = int(project.get("id", 0) or 0)
@@ -99,6 +101,7 @@ class EngineerLoop:
             phase_id = agent.extract_phase_id(reply)
             file_count = agent.extract_file_count(reply)
             sub_phase_doc = agent.extract_sub_phase_doc(reply)
+            is_last_phase = is_engineer_last_phase(sub_phase_doc)
 
             if phase_id in completed:
                 reply = agent.send(CONTINUE_PROMPT)
@@ -113,13 +116,18 @@ class EngineerLoop:
                 snapshot.updated_at = datetime.now(timezone.utc).isoformat()
                 store.save(snapshot)
 
+            phase_marker = " (LAST PHASE)" if is_last_phase else ""
             self._reporter.emit(
                 "status",
                 "EngineerAgent",
-                f"Processing phase {phase_id} ({file_count} estimated files)",
+                f"Processing phase {phase_id}{phase_marker} ({file_count} estimated files)",
             )
 
             route = router.route(file_count)
+            phase_context = None
+            if resume_context and resume_context.engineer_current_phase == phase_id:
+                phase_context = resume_context
+
             if route == "programmer":
                 pr = ProgrammerLoop(self._client, self._config, self._executor, self._reporter).run(
                     sub_phase_doc,
@@ -131,7 +139,9 @@ class EngineerLoop:
                     store=store,
                     task_id=task_id,
                     snapshot=snapshot,
-                    resume_context=None,
+                    resume_context=phase_context,
+                    phase_key=phase_id,
+                    use_stream=use_stream,
                 )
                 sub_result = SubTaskResult(
                     phase_id=phase_id,
@@ -151,7 +161,8 @@ class EngineerLoop:
                     store=store,
                     task_id=task_id,
                     snapshot=snapshot,
-                    resume_context=None,
+                    resume_context=phase_context,
+                    use_stream=use_stream,
                 )
                 success = all(r.success for r in nested)
                 failed = next((r for r in nested if not r.success), None)
@@ -173,6 +184,14 @@ class EngineerLoop:
                 snapshot.current_stage = "engineer"
                 snapshot.updated_at = datetime.now(timezone.utc).isoformat()
                 store.save(snapshot)
+
+            if is_last_phase:
+                self._reporter.emit(
+                    "status",
+                    "EngineerAgent",
+                    f"Last phase {phase_id} completed. All phases done.",
+                )
+                break
 
             reply = agent.send(CONTINUE_PROMPT)
             self._reporter.emit_line_count("EngineerAgent", reply)

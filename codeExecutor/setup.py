@@ -11,7 +11,7 @@ if os.path.exists("README.md"):
 
 setup(
     name="codeAiExecutorLib",
-    version="2.0.0",
+    version="2.1.0",
     description="AI-driven batch file, folder, and shell operations with streaming feedback",
     long_description=long_description,
     long_description_content_type="text/markdown",

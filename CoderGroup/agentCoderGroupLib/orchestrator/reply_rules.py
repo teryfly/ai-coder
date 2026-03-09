@@ -8,6 +8,9 @@ _ENGINEER_END_MARKER = "End of the Coding Task Document - Phase"
 # Supports both "Step[1/2]" and "Step [1/2]" at line start.
 _STEP_LINE_RE = re.compile(r"^\s*Step\s*\[(\d+)\s*/\s*(\d+)\]", re.IGNORECASE)
 
+# Engineer last phase marker in first line
+_LAST_PHASE_MARKER_RE = re.compile(r"\(LAST\s+PHASE\)", re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class StepProgress:
@@ -24,6 +27,11 @@ def _trim_trailing_non_digits(text: str) -> str:
 def _last_non_empty_line(text: str) -> str:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     return lines[-1] if lines else ""
+
+
+def _first_non_empty_line(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    return lines[0] if lines else ""
 
 
 def _ends_with_digit_after_trim(line: str) -> bool:
@@ -55,6 +63,16 @@ def is_engineer_completion_line(line: str) -> bool:
     if _ENGINEER_END_MARKER not in line:
         return False
     return _ends_with_digit_after_trim(line)
+
+
+def is_engineer_last_phase(reply: str) -> bool:
+    """
+    Check if Engineer reply indicates this is the last phase.
+    
+    Returns True if first line contains "(LAST PHASE)" marker.
+    """
+    first_line = _first_non_empty_line(reply)
+    return bool(_LAST_PHASE_MARKER_RE.search(first_line))
 
 
 def parse_last_trailing_int(line: str) -> Optional[int]:

@@ -5,7 +5,6 @@ from ..adapters.code_executor_adapter import CodeExecutorAdapter
 from ..config.app_config import AppConfig
 from ..config.task_types import TaskType
 from ..recovery import ResumeCoordinator, TaskCheckpointStore, TaskEventLog
-from ..reporting.progress_reporter import ProgressReporter
 from ..reporting.result_models import FinalResult
 from .console_ui import ConsoleUI
 from .recoverable_task_runner import RecoverableTaskRunner
@@ -78,6 +77,7 @@ class SessionTaskRunner:
 
             if snap.state == "done":
                 self._ui.append_output("=== Task Completed Successfully ===")
+                self._print_task_summary(snap)
                 return FinalResult(
                     task_id=task_id,
                     success=True,
@@ -88,6 +88,7 @@ class SessionTaskRunner:
 
             if snap.state == "error":
                 self._ui.append_output(f"=== Task Failed: {snap.error_reason} ===")
+                self._print_task_summary(snap)
                 return FinalResult(
                     task_id=task_id,
                     success=False,
@@ -116,3 +117,40 @@ class SessionTaskRunner:
                 self._runner.send_user_reply(task_id, reply)
 
             time.sleep(2)
+
+    def _print_task_summary(self, snap) -> None:
+        self._ui.append_output("")
+        self._ui.append_output("=== Task Execution Summary ===")
+        self._ui.append_output(f"Task ID: {snap.task_id}")
+        self._ui.append_output(f"Task Type: {snap.task_type}")
+        self._ui.append_output(f"Project: {snap.project.get('name', 'N/A') if snap.project else 'N/A'}")
+        self._ui.append_output(f"Final State: {snap.state}")
+        self._ui.append_output(f"Root Directory: {snap.project.get('ai_work_dir', 'N/A') if snap.project else 'N/A'}")
+        self._ui.append_output("")
+
+        if snap.conversation_names:
+            self._ui.append_output("Conversations Used:")
+            for role, name in snap.conversation_names.items():
+                conv_id = snap.conversation_ids.get(role, "N/A")
+                self._ui.append_output(f"  - {role.capitalize()}: {name} (ID: {conv_id})")
+            self._ui.append_output("")
+
+        if snap.engineer_completed_phases:
+            self._ui.append_output(f"Engineer Phases Completed: {len(snap.engineer_completed_phases)}")
+            for phase_id in snap.engineer_completed_phases:
+                phase_conv = snap.programmer_phase_conversations.get(phase_id, "N/A")
+                phase_name = snap.programmer_phase_names.get(phase_id, "N/A")
+                self._ui.append_output(f"  - Phase {phase_id}: {phase_name} (Conv ID: {phase_conv})")
+            self._ui.append_output("")
+
+        if snap.programmer_step_progress:
+            x, y = snap.programmer_step_progress if len(snap.programmer_step_progress) >= 2 else (0, 0)
+            self._ui.append_output(f"Programmer Steps: {x}/{y}")
+            self._ui.append_output("")
+
+        if snap.error_reason:
+            self._ui.append_output(f"Error: {snap.error_reason}")
+            if snap.error_node:
+                self._ui.append_output(f"Error Node: {snap.error_node}")
+
+        self._ui.append_output("=" * 50)

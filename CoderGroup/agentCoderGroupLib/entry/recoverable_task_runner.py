@@ -18,6 +18,7 @@ from ..reporting.progress_reporter import ProgressReporter
 from ..reporting.result_models import ProgressEvent
 
 ProgressCallback = Callable[[ProgressEvent], None]
+CompletionCallback = Callable[[str, bool, dict], None]
 
 
 class RecoverableTaskRunner:
@@ -39,10 +40,16 @@ class RecoverableTaskRunner:
         self._reply_events: dict[str, threading.Event] = {}
         self._reply_values: dict[str, str] = {}
         self._reply_lock = threading.Lock()
+        self._completion_callbacks: dict[str, CompletionCallback] = {}
 
     def _pre_register_task_id(self, task_id: str) -> None:
         with self._reply_lock:
             self._reply_events.setdefault(task_id, threading.Event())
+
+    def register_completion_callback(self, task_id: str, callback: CompletionCallback) -> None:
+        """Register a callback to be invoked when task completes."""
+        with self._reply_lock:
+            self._completion_callbacks[task_id] = callback
 
     def start_task(
         self,
@@ -55,6 +62,7 @@ class RecoverableTaskRunner:
         conversation_document_ids: Optional[list[int]] = None,
         progress_callback: Optional[ProgressCallback] = None,
         predefined_task_id: str | None = None,
+        completion_callback: Optional[CompletionCallback] = None,
     ) -> str:
         task_id = predefined_task_id or str(uuid.uuid4())
         snap = self._coordinator.create_snapshot(
@@ -69,6 +77,10 @@ class RecoverableTaskRunner:
             conversation_document_ids=conversation_document_ids or [],
         )
         self._store.save(snap)
+        
+        if completion_callback:
+            self.register_completion_callback(task_id, completion_callback)
+        
         t = threading.Thread(
             target=self._run_task_thread_safe,
             args=(task_id, None, progress_callback),
@@ -77,13 +89,22 @@ class RecoverableTaskRunner:
         t.start()
         return task_id
 
-    def resume_task(self, task_id: str, progress_callback: Optional[ProgressCallback] = None) -> str:
+    def resume_task(
+        self, 
+        task_id: str, 
+        progress_callback: Optional[ProgressCallback] = None,
+        completion_callback: Optional[CompletionCallback] = None,
+    ) -> str:
         snap = self._store.load(task_id)
         if snap is None:
             raise KeyError(f"Task {task_id} not found")
         snap = TaskStateMachine.transition(snap, "running")
         self._store.save(snap)
         ctx = self._coordinator.build_resume_context(snap)
+        
+        if completion_callback:
+            self.register_completion_callback(task_id, completion_callback)
+        
         t = threading.Thread(
             target=self._run_task_thread_safe,
             args=(task_id, ctx, progress_callback),
@@ -118,6 +139,17 @@ class RecoverableTaskRunner:
         if cb:
             try:
                 cb(event)
+            except Exception:
+                pass
+
+    def _invoke_completion_callback(self, task_id: str, success: bool, summary: dict) -> None:
+        """Invoke registered completion callback if exists."""
+        with self._reply_lock:
+            callback = self._completion_callbacks.pop(task_id, None)
+        
+        if callback:
+            try:
+                callback(task_id, success, summary)
             except Exception:
                 pass
 
@@ -191,6 +223,7 @@ class RecoverableTaskRunner:
                     error_node="ChatBackendClient",
                 )
                 self._emit(task_id, cb, "error", "RecoverableTaskRunner", error_msg)
+                self._invoke_completion_callback(task_id, False, {"error": error_msg})
             except Exception:
                 pass
         except Exception as exc:
@@ -204,6 +237,7 @@ class RecoverableTaskRunner:
                     error_node=stack_trace,
                 )
                 self._emit(task_id, cb, "error", "RecoverableTaskRunner", error_msg)
+                self._invoke_completion_callback(task_id, False, {"error": error_msg, "stack_trace": stack_trace})
             except Exception:
                 pass
 
@@ -238,6 +272,17 @@ class RecoverableTaskRunner:
 
         self._update_snapshot(task_id, state="done", current_stage="done")
         self._emit(task_id, cb, "complete", "RecoverableTaskRunner", "Task finished successfully")
+        
+        # Build completion summary
+        final_snap = self._store.load(task_id)
+        summary = {
+            "project_name": final_snap.project.get("name", "") if final_snap and final_snap.project else "",
+            "root_dir": final_snap.project.get("ai_work_dir", ".") if final_snap and final_snap.project else ".",
+            "phases_completed": len(final_snap.engineer_completed_phases) if final_snap else 0,
+            "conversations": dict(final_snap.conversation_names) if final_snap and final_snap.conversation_names else {},
+        }
+        
+        self._invoke_completion_callback(task_id, True, summary)
 
     def _run_new_dev(self, task_id, snap, project, reporter, provider, ctx):
         docs = self._client.get_knowledge_docs(snap.project_id)
@@ -267,6 +312,7 @@ class RecoverableTaskRunner:
 
     def _run_engineer(self, task_id, snap, project, task_doc, reporter, provider, ctx):
         self._update_snapshot(task_id, current_stage="engineer")
+        use_stream = snap.source == "console"
         EngineerLoop(self._client, self._config, self._executor, reporter).run(
             task_doc=task_doc,
             project=project,
@@ -277,10 +323,12 @@ class RecoverableTaskRunner:
             task_id=task_id,
             snapshot=snap,
             resume_context=ctx,
+            use_stream=use_stream,
         )
 
     def _run_programmer(self, task_id, snap, project, task_doc, reporter, provider, ctx):
         self._update_snapshot(task_id, current_stage="programmer")
+        use_stream = snap.source == "console"
         ProgrammerLoop(self._client, self._config, self._executor, reporter).run(
             task_doc=task_doc,
             project=project,
@@ -291,4 +339,5 @@ class RecoverableTaskRunner:
             task_id=task_id,
             snapshot=snap,
             resume_context=ctx,
+            use_stream=use_stream,
         )
