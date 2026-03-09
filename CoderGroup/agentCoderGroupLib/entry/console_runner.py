@@ -2,10 +2,12 @@ from ..adapters.chat_backend_client import ChatBackendClient, ChatBackendError
 from ..adapters.code_executor_adapter import CodeExecutorAdapter
 from ..config.app_config import AppConfig, load_config, load_prompt
 from ..config.task_types import TaskType, get_agent_key_for_task_type
+from ..recovery import ResumeCoordinator, TaskCheckpointStore, TaskEventLog
 from ..reporting.result_models import FinalResult
 from .console_ui import ConsoleUI
 from .document_reference_selector import DocumentReferenceSelector
 from .project_selector import ProjectSelector
+from .recoverable_task_runner import RecoverableTaskRunner
 from .session_task_runner import SessionTaskRunner
 from .task_type_selector import TaskTypeSelector
 
@@ -22,9 +24,22 @@ class ConsoleRunner:
         self._session_runner = SessionTaskRunner(
             client=self._client, config=self._config, executor=self._executor, ui=self._ui
         )
+        self._store = TaskCheckpointStore(log_dir="log")
+        self._event_log = TaskEventLog(log_dir="log")
+        self._coordinator = ResumeCoordinator(self._store)
+        self._runner = RecoverableTaskRunner(
+            client=self._client,
+            config=self._config,
+            executor=self._executor,
+            store=self._store,
+            coordinator=self._coordinator,
+            event_log=self._event_log,
+        )
+        self._store.mark_all_interrupted_on_startup(source="console")
 
     def run(self) -> None:
         self._ui.set_title("agentCoderGroup Console (Ctrl+Enter to send)")
+        self._check_and_resume_interrupted()
         while True:
             project = self._project_selector.select_or_create()
             if project is None:
@@ -32,6 +47,79 @@ class ConsoleRunner:
                 self._ui.render()
                 return
             self._project_menu(project)
+
+    def _check_and_resume_interrupted(self) -> None:
+        import time
+
+        snapshots = self._coordinator.list_unfinished(source="console")
+        if not snapshots:
+            return
+
+        lines = ["=== Unfinished Tasks Detected ==="]
+        for i, snap in enumerate(snapshots, 1):
+            project_name = snap.project.get('name', '?') if snap.project else snap.project_id
+            lines.append(f"  {i}. Task ID: {snap.task_id} | Type: {snap.task_type} | Project: {project_name} | Stage: {snap.current_stage} | State: {snap.state}")
+        lines.append("  s. Skip and start new task")
+
+        self._ui.set_output(lines)
+        self._ui.set_info(["Select a task to resume, or 's' to skip."])
+
+        selected_snap = None
+        while True:
+            choice = self._ui.prompt_input("Select task index (or s to skip): ")
+            if ConsoleUI.is_exit_command(choice):
+                raise SystemExit(0)
+            if choice.strip().lower() in {'s', 'skip'}:
+                return
+            
+            try:
+                idx = int(choice.strip()) - 1
+                if 0 <= idx < len(snapshots):
+                    selected_snap = snapshots[idx]
+                    break
+                else:
+                    self._ui.append_output("Invalid index.")
+            except ValueError:
+                self._ui.append_output("Please enter a number or 's'.")
+
+        snap = selected_snap
+        self._ui.append_output(f"Resuming Task ID: {snap.task_id}")
+
+        self._runner.resume_task(task_id=snap.task_id, progress_callback=self._build_console_progress_callback())
+
+        if snap.pending_user_input:
+            agent_name = str(snap.pending_user_input.get("agent_name", "agent"))
+            latest_reply = str(snap.pending_user_input.get("latest_reply", ""))
+            self._ui.append_output(f"[{agent_name}] {latest_reply}")
+            reply = self._ui.prompt_input(f"{agent_name}> ")
+            if ConsoleUI.is_exit_command(reply):
+                raise SystemExit(0)
+            self._runner.send_user_reply(snap.task_id, reply)
+
+        self._ui.append_output(f"Task {snap.task_id} resumed. Monitoring progress...")
+        while True:
+            cur = self._store.load(snap.task_id)
+            if cur is None or cur.state in ("done", "error"):
+                if cur and cur.state == "error":
+                    self._ui.append_output(f"=== Task Failed: {cur.error_reason} ===")
+                elif cur:
+                    self._ui.append_output("=== Task Completed Successfully ===")
+                return
+            if cur.state == "waiting_input" and cur.pending_user_input:
+                agent_name = str(cur.pending_user_input.get("agent_name", "agent"))
+                latest_reply = str(cur.pending_user_input.get("latest_reply", ""))
+                self._ui.append_output(f"[{agent_name}] {latest_reply}")
+                reply = self._ui.prompt_input(f"{agent_name}> ")
+                if ConsoleUI.is_exit_command(reply):
+                    raise SystemExit(0)
+                self._runner.send_user_reply(snap.task_id, reply)
+            time.sleep(2)
+
+    def _build_console_progress_callback(self):
+        def cb(event):
+            self._ui.append_output(f"[{event.agent}] {event.message}")
+
+        return cb
 
     def _project_menu(self, project: dict) -> None:
         while True:
@@ -143,7 +231,6 @@ class ConsoleRunner:
         )
         self._ui.set_info(["Reference preview before chat.", "Input /back to return."])
         self._ui.render()
-
         self._ui.append_output("Interactive mode. /back to return.")
         while True:
             msg = self._ui.prompt_input("You: ")

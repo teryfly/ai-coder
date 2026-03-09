@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from ..adapters.chat_backend_client import ChatBackendClient, ChatBackendError
+from ..adapters.chat_backend_client import ChatBackendClient
 from ..adapters.code_executor_adapter import CodeExecutorAdapter
 from ..config.app_config import AppConfig
 from ..config.task_types import TaskType
-from ..orchestrator.architect_loop import ArchitectLoop
-from ..orchestrator.engineer_loop import EngineerLoop
-from ..orchestrator.programmer_loop import ProgrammerLoop
-from ..orchestrator.task_router import TaskRouter
+from ..recovery import ResumeCoordinator, TaskCheckpointStore, TaskEventLog
 from ..reporting.progress_reporter import ProgressReporter
 from ..reporting.result_models import FinalResult
 from .console_ui import ConsoleUI
+from .recoverable_task_runner import RecoverableTaskRunner
 
 
 class SessionTaskRunner:
@@ -25,6 +23,17 @@ class SessionTaskRunner:
         self._config = config
         self._executor = executor
         self._ui = ui
+        self._store = TaskCheckpointStore(log_dir="log")
+        self._event_log = TaskEventLog(log_dir="log")
+        self._coordinator = ResumeCoordinator(self._store)
+        self._runner = RecoverableTaskRunner(
+            client=self._client,
+            config=self._config,
+            executor=self._executor,
+            store=self._store,
+            coordinator=self._coordinator,
+            event_log=self._event_log,
+        )
 
     def run(
         self,
@@ -35,145 +44,75 @@ class SessionTaskRunner:
         conversation_document_ids: list[int] | None = None,
         existing_conversation_id: str | None = None,
     ) -> FinalResult:
-        reporter = ProgressReporter(mode="console")
-        user_reply_provider = self._build_user_reply_provider()
+        import time
 
-        if task_type == "formal_dev":
-            return self._run_formal_dev(
-                project,
-                conv_name,
-                requirement,
-                reporter,
-                user_reply_provider,
-                conversation_document_ids,
-                existing_conversation_id,
-            )
-        if task_type == "code_change":
-            return self._run_code_change(
-                project,
-                conv_name,
-                requirement,
-                reporter,
-                user_reply_provider,
-                conversation_document_ids,
-                existing_conversation_id,
-            )
-        return self._run_new_dev(
-            project,
-            conv_name,
-            requirement,
-            reporter,
-            user_reply_provider,
-            conversation_document_ids,
-            existing_conversation_id,
-        )
+        def progress_callback(event):
+            self._ui.append_output(f"[{event.agent}] {event.message}")
 
-    def _run_new_dev(self, project, conv_name, requirement, reporter, user_reply_provider, conv_docs, existing_id):
-        docs = []
-        try:
-            docs = self._client.get_knowledge_docs(int(project["id"]))
-        except ChatBackendError as exc:
-            self._ui.append_output(f"[Warning] Failed to load knowledge docs: {exc}")
-
-        knowledge_block = "".join(
-            f"----- {d.get('filename', 'doc')} BEGIN -----\n{d.get('content', '')}\n----- {d.get('filename', 'doc')} END -----\n\n"
-            for d in docs
-        )
-        first_message = (knowledge_block + requirement).strip()
-
-        arch = ArchitectLoop(self._client, self._config, reporter).run(
+        task_id = self._runner.start_task(
             project_id=int(project["id"]),
+            requirement=requirement,
             conv_name=conv_name,
-            first_message=first_message,
-            user_reply_provider=user_reply_provider,
-            conversation_document_ids=conv_docs,
-            conversation_id=existing_id,
-        )
-        route = TaskRouter(self._config.max_files_per_run).route(arch.file_count)
-        self._ui.append_output(f"Routing decision: {route}")
-
-        if route == "programmer":
-            p = ProgrammerLoop(self._client, self._config, self._executor, reporter).run(
-                arch.task_doc,
-                project,
-                user_reply_provider=user_reply_provider,
-                conversation_document_ids=conv_docs,
-            )
-            return FinalResult(
-                task_id=arch.conversation_id,
-                success=p.success,
-                root_dir=p.root_dir,
-                project_name=project.get("name", ""),
-                sub_results=[],
-                error_node=p.error_node,
-                error_reason=p.error_reason,
-            )
-
-        sub = EngineerLoop(self._client, self._config, self._executor, reporter).run(
-            arch.task_doc,
-            project,
-            user_reply_provider=user_reply_provider,
-            conversation_document_ids=conv_docs,
-        )
-        success = all(r.success for r in sub)
-        failed = next((r for r in sub if not r.success), None)
-        return FinalResult(
-            task_id=arch.conversation_id,
-            success=success,
-            root_dir=project.get("ai_work_dir", "."),
-            project_name=project.get("name", ""),
-            sub_results=sub,
-            error_node=failed.error_node if failed else None,
-            error_reason=failed.error_reason if failed else None,
+            task_type=task_type,
+            source="console",
+            project_document_ids=[],
+            conversation_document_ids=conversation_document_ids or [],
+            progress_callback=progress_callback,
         )
 
-    def _run_formal_dev(self, project, conv_name, requirement, reporter, user_reply_provider, conv_docs, existing_id):
-        sub = EngineerLoop(self._client, self._config, self._executor, reporter).run(
-            requirement,
-            project,
-            user_reply_provider=user_reply_provider,
-            conversation_document_ids=conv_docs,
-            conv_name=conv_name,
-            conversation_id=existing_id,
-        )
-        success = all(r.success for r in sub)
-        failed = next((r for r in sub if not r.success), None)
-        return FinalResult(
-            task_id=existing_id or conv_name,
-            success=success,
-            root_dir=project.get("ai_work_dir", "."),
-            project_name=project.get("name", ""),
-            sub_results=sub,
-            error_node=failed.error_node if failed else None,
-            error_reason=failed.error_reason if failed else None,
-        )
+        self._ui.append_output(f"Task {task_id} started. Monitoring progress...")
 
-    def _run_code_change(self, project, conv_name, requirement, reporter, user_reply_provider, conv_docs, existing_id):
-        p = ProgrammerLoop(self._client, self._config, self._executor, reporter).run(
-            requirement,
-            project,
-            user_reply_provider=user_reply_provider,
-            conversation_document_ids=conv_docs,
-            conv_name=conv_name,
-            conversation_id=existing_id,
-        )
-        return FinalResult(
-            task_id=existing_id or conv_name,
-            success=p.success,
-            root_dir=p.root_dir,
-            project_name=project.get("name", ""),
-            sub_results=[],
-            error_node=p.error_node,
-            error_reason=p.error_reason,
-        )
+        while True:
+            snap = self._store.load(task_id)
+            if snap is None:
+                error_msg = f"Task {task_id} snapshot not found"
+                self._ui.append_output(f"=== Error: {error_msg} ===")
+                return FinalResult(
+                    task_id=task_id,
+                    success=False,
+                    root_dir=project.get("ai_work_dir", "."),
+                    project_name=project.get("name", ""),
+                    sub_results=[],
+                    error_reason=error_msg,
+                )
 
-    def _build_user_reply_provider(self):
-        def user_reply_provider(agent_name: str, latest_reply: str) -> str:
-            self._ui.append_output(f"[{agent_name}] needs your input.")
-            self._ui.append_output(latest_reply)
-            msg = self._ui.prompt_input(f"{agent_name}> ")
-            if ConsoleUI.is_exit_command(msg):
-                raise SystemExit(0)
-            return msg
+            if snap.state == "done":
+                self._ui.append_output("=== Task Completed Successfully ===")
+                return FinalResult(
+                    task_id=task_id,
+                    success=True,
+                    root_dir=snap.project.get("ai_work_dir", ".") if snap.project else ".",
+                    project_name=snap.project.get("name", "") if snap.project else "",
+                    sub_results=[],
+                )
 
-        return user_reply_provider
+            if snap.state == "error":
+                self._ui.append_output(f"=== Task Failed: {snap.error_reason} ===")
+                return FinalResult(
+                    task_id=task_id,
+                    success=False,
+                    root_dir=snap.project.get("ai_work_dir", ".") if snap.project else ".",
+                    project_name=snap.project.get("name", "") if snap.project else "",
+                    sub_results=[],
+                    error_node=snap.error_node,
+                    error_reason=snap.error_reason,
+                )
+
+            if snap.state == "waiting_input" and snap.pending_user_input:
+                agent_name = str(snap.pending_user_input.get("agent_name", "agent"))
+                latest_reply = str(snap.pending_user_input.get("latest_reply", ""))
+                self._ui.append_output(f"[{agent_name}] {latest_reply}")
+                reply = self._ui.prompt_input(f"{agent_name}> ")
+                if ConsoleUI.is_exit_command(reply):
+                    self._ui.append_output("Task interrupted by user. State saved for later resume.")
+                    return FinalResult(
+                        task_id=task_id,
+                        success=False,
+                        root_dir=snap.project.get("ai_work_dir", ".") if snap.project else ".",
+                        project_name=snap.project.get("name", "") if snap.project else "",
+                        sub_results=[],
+                        error_reason="User interrupted",
+                    )
+                self._runner.send_user_reply(task_id, reply)
+
+            time.sleep(2)

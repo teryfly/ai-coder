@@ -1,9 +1,17 @@
+from __future__ import annotations
+
 import re
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ..adapters.code_executor_adapter import CodeExecutorAdapter
 from ..agents.programmer_agent import ProgrammerAgent
 from ..reporting.progress_reporter import ProgressReporter
 from ..reporting.result_models import ExecutionResult, StepBlock
+
+if TYPE_CHECKING:
+    from ..recovery.checkpoint_store import TaskCheckpointStore
+    from ..recovery.task_snapshot import ResumeContext, TaskSnapshot
 
 _SHELL_ACTIONS = {"execute shell command", "run command"}
 
@@ -14,19 +22,35 @@ class ExecutionPipeline:
         self._reporter = reporter
 
     def run(
-        self, code_output: str, root_dir: str, programmer: ProgrammerAgent
+        self,
+        code_output: str,
+        root_dir: str,
+        programmer: ProgrammerAgent,
+        store: "TaskCheckpointStore | None" = None,
+        task_id: str | None = None,
+        snapshot: "TaskSnapshot | None" = None,
+        resume_context: "ResumeContext | None" = None,
     ) -> ExecutionResult:
         self._reporter.emit("status", "ExecutionPipeline", "Writing all code files...")
         self._executor.write_code(root_dir, code_output)
 
+        if store and task_id and snapshot and resume_context is None:
+            snapshot.execution_completed_steps = []
+            snapshot.updated_at = datetime.now(timezone.utc).isoformat()
+            store.save(snapshot)
+
         steps = self._extract_steps(code_output)
-        self._reporter.emit(
-            "status", "ExecutionPipeline", f"Parsed {len(steps)} steps to execute"
-        )
+        self._reporter.emit("status", "ExecutionPipeline", f"Parsed {len(steps)} steps to execute")
 
+        completed_indices = set(resume_context.execution_completed_steps if resume_context else [])
         for step in steps:
-            single_dsl = self._build_single_step_dsl(step)
+            if step.index in completed_indices:
+                self._reporter.emit(
+                    "status", "ExecutionPipeline", f"Skipping already-completed step {step.index}"
+                )
+                continue
 
+            single_dsl = self._build_single_step_dsl(step)
             if step.action.lower() in _SHELL_ACTIONS:
                 ok, error = self._executor.dry_run(root_dir, single_dsl)
                 if not ok:
@@ -35,17 +59,25 @@ class ExecutionPipeline:
                         "ExecutionPipeline",
                         f"dry_run failed for Step {step.index}/{step.total}: {error}",
                     )
-                    success, step = self._repair_loop(step, error, programmer, root_dir)
+                    success, repaired_step = self._repair_loop(step, error, programmer, root_dir)
                     if not success:
                         return ExecutionResult(
                             success=False,
                             summary={},
-                            failed_step=step,
+                            failed_step=repaired_step,
                             error=error,
                         )
+                    step = repaired_step
                     single_dsl = self._build_single_step_dsl(step)
 
             self._executor.execute_full(root_dir, single_dsl)
+
+            if store and task_id and snapshot:
+                if step.index not in snapshot.execution_completed_steps:
+                    snapshot.execution_completed_steps.append(step.index)
+                snapshot.updated_at = datetime.now(timezone.utc).isoformat()
+                store.save(snapshot)
+
             self._reporter.emit(
                 "progress",
                 "ExecutionPipeline",
@@ -82,20 +114,14 @@ class ExecutionPipeline:
         return steps
 
     def _build_single_step_dsl(self, step: StepBlock) -> str:
-        lines = [
-            f"Step [1/1] - {step.description}",
-            f"Action: {step.action}",
-        ]
+        lines = [f"Step [1/1] - {step.description}", f"Action: {step.action}"]
         if step.file_path:
             lines.append(f"File Path: {step.file_path}")
         if step.destination:
             lines.append(f"Destination: {step.destination}")
         if step.line_number is not None:
             lines.append(f"Line: {step.line_number}")
-        lines.append("")
-        lines.append("```bash")
-        lines.append(step.content)
-        lines.append("```")
+        lines.extend(["", "```bash", step.content, "```"])
         return "\n".join(lines)
 
     def _repair_loop(
@@ -108,23 +134,16 @@ class ExecutionPipeline:
     ) -> tuple[bool, StepBlock]:
         step_desc = f"[{step.index}/{step.total}]"
         current_error = error
-
         for _ in range(max_retries):
             feedback = programmer.format_error_feedback(step_desc, current_error)
             reply = programmer.send(feedback)
-
             revised_steps = self._extract_steps(reply)
-            target = next(
-                (s for s in revised_steps if s.action.lower() in _SHELL_ACTIONS),
-                None,
-            )
+            target = next((s for s in revised_steps if s.action.lower() in _SHELL_ACTIONS), None)
             if not target:
                 continue
-
             single_dsl = self._build_single_step_dsl(target)
             ok, new_error = self._executor.dry_run(root_dir, single_dsl)
             if ok:
                 return True, target
             current_error = new_error
-
         return False, step

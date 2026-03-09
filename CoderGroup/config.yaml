@@ -12,5 +12,5 @@ agents:
     model: "GPT-5.3-Codex"
     prompt_file: "role_prompts/engineer.md"
   programmer:
-    model: "GPT-5.3-Codex"
+    model: "Claude-Sonnet-4.5"
     prompt_file: "role_prompts/programmer.md"

@@ -13,13 +13,16 @@ __all__ = [
     "AppConfig",
     "FinalResult",
     "ProgressEvent",
+    "TaskCheckpointStore",
+    "ResumeCoordinator",
 ]
 
 if TYPE_CHECKING:
-    # Imported only for static typing; no runtime side effects.
     from .config.app_config import AppConfig
     from .entry.console_runner import ConsoleRunner
     from .entry.onboard_server import OnboardServer
+    from .recovery.checkpoint_store import TaskCheckpointStore
+    from .recovery.resume_coordinator import ResumeCoordinator
     from .reporting.result_models import FinalResult, ProgressEvent
 
 
@@ -41,4 +44,12 @@ def __getattr__(name: str) -> Any:
         from .reporting.result_models import FinalResult, ProgressEvent
 
         return FinalResult if name == "FinalResult" else ProgressEvent
+    if name == "TaskCheckpointStore":
+        from .recovery.checkpoint_store import TaskCheckpointStore
+
+        return TaskCheckpointStore
+    if name == "ResumeCoordinator":
+        from .recovery.resume_coordinator import ResumeCoordinator
+
+        return ResumeCoordinator
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
